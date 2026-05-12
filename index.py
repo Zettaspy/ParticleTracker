@@ -5,8 +5,12 @@
 # Not straight a line is for particle path to determiene turbulent versus laminer
 #           - look at papers 
 #           https://www.grc.nasa.gov/www/k-12/airplane/reynolds.html
-#           https://arxiv.org/html/2507.00974v2
+#           https://arxiv.org/html/2507.
+#   Look up traditional value (10 -6) 
 # Bell graph plot for all particles
+# Undistort image
+# Python function to determine pixel to centimeter through video calibration
+
 
 import cv2
 import csv
@@ -56,6 +60,8 @@ GHOST_FRAMES   = 20
 
 VELOCITY_SMOOTH = 0.8
 CONFIRM_FRAMES = 3
+
+PATH_SEGMENTS = 2
 
 particles  = {}
 all_particle_histories = {}
@@ -319,7 +325,7 @@ def match_and_update(particles, detections, next_id):
 #
 
 """ Plot Path of Particles and Length of Particles and save as PNG """
-def plot_paths(avg_vx, avg_vy):
+def plot_paths():
     par_ids = list(particles.keys())
     fig, ax = mpylt.subplots(figsize=(10, 8))
     fig2, ax2 = mpylt.hist()
@@ -332,6 +338,11 @@ def plot_paths(avg_vx, avg_vy):
         for vx, vy in coords:
             x_coords.append(vx)
             y_coords.append(vy)
+        
+        #Split coords into Segments using PATH_SEGMENTS and Velocities then make bell curve (figure that out)
+        
+        mean_ = np.mean(x_coords)
+        std_ = np.std(x_coords)        
 
         ax.plot(x_coords, y_coords, label="f'Particle {pid}'")
 
@@ -469,7 +480,7 @@ if all_velocities:
     ])
 
     # Add Plots
-    plot_paths(avg_vx, avg_vy)
+    plot_paths()
     
 else:
     print("No motion data recorded.")
