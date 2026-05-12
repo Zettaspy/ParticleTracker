@@ -319,7 +319,7 @@ def match_and_update(particles, detections, next_id):
 #
 
 """ Plot Path of Particles and Length of Particles and save as PNG """
-def plot_paths():
+def plot_paths(avg_vx, avg_vy):
     par_ids = list(particles.keys())
     fig, ax = mpylt.subplots(figsize=(10, 8))
     fig2, ax2 = mpylt.hist()
