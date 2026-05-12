@@ -1,6 +1,22 @@
+# Double check ghosting frame  (Done)
+# Check speed x and y          (Done)
+# Dont show not moving (instead of just tracked) (Done, But probably needs to be tweaked basd on taste)
+# plot particle path for the video (transparent path to demonstrate multiple) (Last frame of video)
+# Not straight a line is for particle path to determiene turbulent versus laminer
+#           - look at papers 
+#           https://www.grc.nasa.gov/www/k-12/airplane/reynolds.html
+#           https://arxiv.org/html/2507.00974v2
+# Bell graph plot for all particles
+
 import cv2
 import csv
 import numpy as np
+import math
+import matplotlib as mpl
+import matplotlib.pyplot as mpylt
+from matplotlib.path import Path
+import matplotlib.patches as patches
+import matplotlib.image as mimg
 from scipy.spatial.distance import cdist
 
 name = "laminar.MP4"
@@ -20,15 +36,22 @@ ADAPT_BLOCK = 41
 ADAPT_C = -4
 CLAHE_CLIP = 2.0
 
+DECTECT_CIRCLES = True
+SAME_COLOR = False
+
 MIN_BLOB_AREA = 250
 MAX_BLOB_AREA = 8000
 CIRCULARITY_MIN = 0.4
+MOTION_MIN = 2
+DRAWN_MOTION_MIN = 0.05
+STATIC_MIN = 5
 
 MAX_FRAME = 155
 
 MAX_MATCH_DIST = 80
 REAPPEAR_DIST  = 120
 MAX_VELOCITY   = 25
+MIN_VELOCITY   = 0.5
 GHOST_FRAMES   = 20
 
 VELOCITY_SMOOTH = 0.8
@@ -70,6 +93,8 @@ if WRITE_TRACKED_VIDEO:
     output_writer = cv2.VideoWriter(
         "tracked_output.mp4", fourcc, fps, (SCREEN_X, SCREEN_Y)
     )
+
+
 
 def detect_particles(frame, motion_mask, static_mask):
     frame = cv2.resize(frame, (SCREEN_X, SCREEN_Y))
@@ -116,33 +141,23 @@ def detect_particles(frame, motion_mask, static_mask):
         motion_score = cv2.mean(motion_mask, mask=mask)[0]
         static_score = cv2.mean(static_mask, mask=mask)[0]
 
-        if motion_score < 2:
+        if motion_score < MOTION_MIN:
             continue
 
-        if static_score < 5:
+        if static_score < STATIC_MIN:
             continue
 
         blobs.append((cx, cy, area, cnt))
 
     return blobs, binary
+#
+
 
 def velocity_to_angle(vx, vy):
     angle = np.degrees(np.arctan2(-vy, vx)) % 360
     return angle
+#
 
-def avg_velocities_from_hist(v):
-    sum_x = 0
-    sum_y = 0
-    size = 0
-    for vx, vy in v:
-        sum_x = sum_y + vx
-        sum_y = sum_y + vy
-        size += 1
-
-    sum_x = sum_x / size
-    sum_y = sum_y / size
-
-    return (sum_x, sum_y)
 
 def predict_position(p):
     cx, cy = p["center"]
@@ -152,6 +167,8 @@ def predict_position(p):
     scale = 1.0 if ghost == 0 else max(0.5, 1.0 - ghost * 0.08)
     return cx + vx * scale, cy + vy * scale
 
+#
+
 def retire_particle(pid, p):
     """Write per-particle summary row and store history when a particle dies."""
     hist = p["history"]
@@ -159,17 +176,20 @@ def retire_particle(pid, p):
         all_particle_histories[pid] = hist
         speeds = [np.hypot(vx, vy) for vx, vy in hist]
         angles = [velocity_to_angle(vx, vy) for vx, vy in hist]
-        avg_velocity_x, avg_velocity_y = avg_velocities_from_hist(hist)
+        avg_velocity_x = [vx for vx, _ in hist]
+        avg_velocity_y = [vy for _, vy in hist]
+
         csv_writer_per_particle.writerow([
             pid,
             len(hist),
-            f"{np.mean(speeds):.4f}",
+            f"{np.average(speeds):.4f}",
             f"{np.std(speeds):.4f}",
-            f"{np.mean(angles):.4f}",
+            f"{np.average(angles):.4f}",
             f"{np.std(angles):.4f}",
-            f"{avg_velocity_x:.4f}",
-            f"{avg_velocity_y:.4f}",
+            f"{np.average(avg_velocity_x):.4f}",
+            f"{np.average(avg_velocity_y):.4f}",
         ])
+#
 
 def match_and_update(particles, detections, next_id):
     global frame_index
@@ -177,10 +197,12 @@ def match_and_update(particles, detections, next_id):
     if not detections:
         for pid, p in particles.items():
             p["ghost"] += 1
+            p["confirmed"] = False
 
         new_particles = {}
         for pid, p in particles.items():
             if p["ghost"] < GHOST_FRAMES:
+                #p["confirmed"] = True                     # Reinitalize if you want to maintain the last position of ghost particle
                 new_particles[pid] = p
             else:
                 retire_particle(pid, p)
@@ -240,13 +262,22 @@ def match_and_update(particles, detections, next_id):
 
         speed = np.hypot(svx, svy)
 
-        if speed > 0.5:
+        if speed > MIN_VELOCITY:
             particles[pid]["moving_frames"] += 1
         else:
             particles[pid]["moving_frames"] = max(0, particles[pid]["moving_frames"] - 1)
 
-        if particles[pid]["moving_frames"] >= CONFIRM_FRAMES:
+        """ To stop drawing if the value is a ghosted value (determines via the history of the particle)"""
+        try:
+            p_hist = particles[pid]["history"][len(particles[pid]["history"]) - 1]
+            p_hist_result = math.sqrt(((speed - p_hist[len(p_hist) - 1]) ** 2))
+        except:
+            p_hist_result = 0
+
+        if particles[pid]["moving_frames"] >= CONFIRM_FRAMES or p_hist_result >= DRAWN_MOTION_MIN:
             particles[pid]["confirmed"] = True
+        else:
+            particles[pid]["confirmed"] = False
 
         particles[pid]["history"].append((svx, svy))
         particles[pid].update({
@@ -285,7 +316,34 @@ def match_and_update(particles, detections, next_id):
             next_id += 1
 
     return new_particles, next_id
+#
 
+""" Plot Path of Particles and Length of Particles and save as PNG """
+def plot_paths():
+    par_ids = list(particles.keys())
+    fig, ax = mpylt.subplots(figsize=(10, 8))
+    fig2, ax2 = mpylt.hist()
+
+    for pid in par_ids:
+        coords = particles[pid]['history']
+        x_coords = []
+        y_coords = []
+
+        for vx, vy in coords:
+            x_coords.append(vx)
+            y_coords.append(vy)
+
+        ax.plot(x_coords, y_coords, label="f'Particle {pid}'")
+
+    ax.set_title(f"{name} Particle Paths")
+    ax.set_xlabel("X Position")
+    ax.set_ylabel("y Position")
+    ax.grid(True)
+
+    mpylt.savefig(f'{name}_particle_paths.png', dpi=300, bbox_inches='tight')
+    mpylt.show()
+
+# -- MAIN --
 while True and frame_index <= MAX_FRAME:
     ret, frame = video.read()
     if not ret:
@@ -318,18 +376,34 @@ while True and frame_index <= MAX_FRAME:
 
     vis = frame.copy()
     for pid, p in particles.items():
-        # if not p["confirmed"]:      Confirmed particle flag is not working atm
-        #     continue
 
         cx, cy = p["center"]
         vx, vy = p["velocity"]
         speed = np.hypot(vx, vy)
-
-        color = COLORS[pid % len(COLORS)]
         radius = max(12, int((p["area"] / np.pi) ** 0.5) + 4)
 
-        cv2.circle(vis, (cx, cy), radius, color, 2)
+        if not p["confirmed"]:
+            if DECTECT_CIRCLES:
+                color = 200
+                cv2.circle(vis, (cx, cy), radius, color, 2)
+                cv2.putText(
+                    vis,
+                    f"ID {pid}",
+                    (cx + 10, cy - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    1,
+                    cv2.LINE_AA
+                )
+            continue
 
+        if SAME_COLOR:
+            color = (50, 255, 50)
+        else:
+            color = COLORS[pid % len(COLORS)]
+
+        cv2.circle(vis, (cx, cy), radius, color, 2)
         cv2.putText(
             vis,
             f"ID {pid}",
@@ -354,6 +428,7 @@ while True and frame_index <= MAX_FRAME:
 
     prev_gray = gray.copy()
     frame_index += 1
+#
 
 
 video.release()
@@ -367,15 +442,23 @@ for pid, p in particles.items():
 all_velocities = [v for hist in all_particle_histories.values() for v in hist]
 
 if all_velocities:
-    avg_vx = np.mean([v[0] for v in all_velocities])
-    avg_vy = np.mean([v[1] for v in all_velocities])
-    avg_speed = np.mean([np.hypot(v[0], v[1]) for v in all_velocities])
+    avg_vx = np.average([v[0] for v in all_velocities])
+    avg_vy = np.average([v[1] for v in all_velocities])
+    avg_speed = np.average([np.hypot(v[0], v[1]) for v in all_velocities])
+    reynolds_number = 0  # add later to determine if laminar or turbulent
 
     print("\n===== TRACKING RESULTS =====")
     print(f"Particles tracked: {len(all_particle_histories)}")
     print(f"Average velocity: {avg_vx:.2f}, {avg_vy:.2f}")
     print(f"Average speed: {avg_speed:.2f}")
     print(f"Angle: {velocity_to_angle(avg_vx, avg_vy)}")
+    print(f"Reynalds Number: {reynolds_number:.2f}")
+    if reynolds_number <= 2300:
+        print(f"Flow Type: Laminar")
+    elif reynolds_number > 4000:
+        print(f"Flow Type: Turbulent")
+    else:
+        print(f"Flow Type: Mixed")
 
     csv_writer_summary.writerow([
         len(all_particle_histories),
@@ -384,6 +467,10 @@ if all_velocities:
         f"{avg_speed:.2f}",
         f"{velocity_to_angle(avg_vx, avg_vy):.2f}",
     ])
+
+    # Add Plots
+    plot_paths(avg_vx, avg_vy)
+    
 else:
     print("No motion data recorded.")
 
