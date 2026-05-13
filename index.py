@@ -1,26 +1,8 @@
-# Double check ghosting frame  (Done)
-# Check speed x and y          (Done)
-# Dont show not moving (instead of just tracked) (Done, But probably needs to be tweaked basd on taste)
-# plot particle path for the video (transparent path to demonstrate multiple) (Last frame of video)
-# Not straight a line is for particle path to determiene turbulent versus laminer
-#           - look at papers 
-#           https://www.grc.nasa.gov/www/k-12/airplane/reynolds.html
-#           https://arxiv.org/html/2507.
-#   Look up traditional value (10 -6) 
-# Bell graph plot for all particles
-# Undistort image
-# Python function to determine pixel to centimeter through video calibration
-
-
 import cv2
 import csv
 import numpy as np
 import math
-import matplotlib as mpl
 import matplotlib.pyplot as mpylt
-from matplotlib.path import Path
-import matplotlib.patches as patches
-import matplotlib.image as mimg
 from scipy.spatial.distance import cdist
 
 name = "laminar.MP4"
@@ -179,7 +161,11 @@ def retire_particle(pid, p):
     """Write per-particle summary row and store history when a particle dies."""
     hist = p["history"]
     if hist:
-        all_particle_histories[pid] = hist
+        all_particle_histories[pid] = {
+            "history": hist,
+            "start_center": p.get("start_center", p["center"])
+        }
+
         speeds = [np.hypot(vx, vy) for vx, vy in hist]
         angles = [velocity_to_angle(vx, vy) for vx, vy in hist]
         avg_velocity_x = [vx for vx, _ in hist]
@@ -221,6 +207,7 @@ def match_and_update(particles, detections, next_id):
         for cx, cy, area, cnt in detections:
             particles[next_id] = {
                 "center": (cx, cy),
+                "start_center": (cx, cy),
                 "velocity": (0.0, 0.0),
                 "ghost": 0,
                 "moving_frames": 0,
@@ -312,6 +299,7 @@ def match_and_update(particles, detections, next_id):
         if di not in matched_dets:
             new_particles[next_id] = {
                 "center": (cx, cy),
+                "start_center": (cx, cy),
                 "velocity": (0.0, 0.0),
                 "ghost": 0,
                 "moving_frames": 0,
@@ -324,35 +312,90 @@ def match_and_update(particles, detections, next_id):
     return new_particles, next_id
 #
 
-""" Plot Path of Particles and Length of Particles and save as PNG """
 def plot_paths():
-    par_ids = list(particles.keys())
-    fig, ax = mpylt.subplots(figsize=(10, 8))
-    fig2, ax2 = mpylt.hist()
+    if not all_particle_histories:
+        print("No particle history to plot.")
+        return
 
-    for pid in par_ids:
-        coords = particles[pid]['history']
-        x_coords = []
-        y_coords = []
+    fig1, (ax1, ax_speed, ax_length) = mpylt.subplots(3, figsize=(14, 10))
+    cmap = mpylt.get_cmap('gist_rainbow')
+    colors = [cmap(i) for i in np.linspace(0, 1, len(all_particle_histories.items()))]
 
-        for vx, vy in coords:
-            x_coords.append(vx)
-            y_coords.append(vy)
+    i = 0  # Enumerate being weird with dictonaries
+    for pid, data in all_particle_histories.items():
+        hist = data["history"]
+        start_cx, start_cy = data["start_center"]
+
+        if not hist:
+            continue
+
+        xs = [start_cx]
+        ys = [start_cy]
+        for vx, vy in hist:
+            xs.append(xs[-1] + vx)
+            ys.append(ys[-1] + vy)
         
-        #Split coords into Segments using PATH_SEGMENTS and Velocities then make bell curve (figure that out)
-        
-        mean_ = np.mean(x_coords)
-        std_ = np.std(x_coords)        
+        color = colors[i] # Change this later needs to be better unique colors
+        ax1.plot(xs, ys, color=color, linewidth=1.2, alpha=0.7)
+        ax1.plot(xs[0], ys[0], 'o', color=color, markersize=5) 
+        i += 1
 
-        ax.plot(x_coords, y_coords, label="f'Particle {pid}'")
+    ax1.set_title(f"{name} Particle Paths")
+    ax1.set_xlabel("X Position (px)")
+    ax1.set_ylabel("Y Position (px)")
+    ax1.invert_yaxis()
+    ax1.set_xlim(0, SCREEN_X)
+    ax1.set_ylim(SCREEN_Y, 0)
+    ax1.grid(True)
+    #mpylt.savefig(f"{name}_particle_paths.png", dpi=300, bbox_inches="tight")
 
-    ax.set_title(f"{name} Particle Paths")
-    ax.set_xlabel("X Position")
-    ax.set_ylabel("y Position")
-    ax.grid(True)
+    all_speeds = []
+    all_path_lengths = []
 
-    mpylt.savefig(f'{name}_particle_paths.png', dpi=300, bbox_inches='tight')
+    for pid, data in all_particle_histories.items():
+        hist = data["history"]
+        if not hist:
+            continue
+
+        speeds = [np.hypot(vx, vy) for vx, vy in hist]
+        all_speeds.extend(speeds)
+        all_path_lengths.append(sum(speeds))
+
+    #fig2, (ax_speed, ax_length) = mpylt.subplots(1, 2, figsize=(14, 6))
+
+    plot_bell(ax_speed,  all_speeds, "Speed Distribution", "Speed (px/frame)", "#00cfff")
+    plot_bell(ax_length, all_path_lengths, "Path Length Distribution", "Path Length (px)",  "#ffaa00")
+    
+    fig1.suptitle(f"{name} Speed & Path Length Distributions", fontsize=13)
+    mpylt.tight_layout()
+    mpylt.savefig(f"{name}_graphs.png", dpi=300, bbox_inches="tight")
     mpylt.show()
+#
+
+
+def plot_bell(ax, data, title, xlabel, color):
+    if len(data) < 2:
+        return
+    data = np.array(data)
+    mu, sigma = np.mean(data), np.std(data)
+
+    ax.hist(data, bins=30, density=True, alpha=0.45, color=color, edgecolor="white")
+
+    x_range = np.linspace(mu - 4 * sigma, mu + 4 * sigma, 300)
+    gaussian = (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_range - mu) / sigma) ** 2)
+    ax.plot(x_range, gaussian, color=color, linewidth=2.5)
+
+    ax.axvline(mu, color="white", linestyle="--", linewidth=1.5, label=f"μ = {mu:.2f}")
+    ax.axvline(mu - sigma, color="gray", linestyle=":", linewidth=1.0, label=f"σ = {sigma:.2f}")
+    ax.axvline(mu + sigma, color="gray", linestyle=":", linewidth=1.0)
+
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Probability Density")
+    ax.legend(fontsize=9)
+    ax.grid(True)
+#
+
 
 # -- MAIN --
 while True and frame_index <= MAX_FRAME:
@@ -450,7 +493,7 @@ cv2.destroyAllWindows()
 for pid, p in particles.items():
     retire_particle(pid, p)
 
-all_velocities = [v for hist in all_particle_histories.values() for v in hist]
+all_velocities = [v for hist in all_particle_histories.values() for v in hist["history"]]
 
 if all_velocities:
     avg_vx = np.average([v[0] for v in all_velocities])
