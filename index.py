@@ -1,23 +1,43 @@
 import cv2
 import csv
 import numpy as np
-import math
+from math import sqrt
 import matplotlib.pyplot as mpylt
 from scipy.spatial.distance import cdist
+from scipy.io import loadmat
+import imutils
 
-name = "laminar.MP4"
-video = cv2.VideoCapture(f"videos/{name}")
+# name = "Calibration_0010.tif"
+# path = "tests/20240814_CameraA_frames_extracted20260407"
+
+name = "turbulent.MP4"
+path = "videos/"
+
+video = cv2.VideoCapture(f"{path}/{name}")
+
+calibration_data_name = "opencv_params.mat"
+
+calibration_data = loadmat(f'./cameraCalibration/{calibration_data_name}', simplify_cells=True)
+calibration_output = calibration_data["convertedCP"]
+
+K = calibration_output["CameraMatrix"]
+radial = calibration_output["RadialDistortion"]
+tangential = calibration_output["TangentialDistortion"]
+
+dist = np.array([
+    radial[0],
+    radial[1],
+    tangential[0],
+    tangential[1],
+    radial[2] if len(radial) > 2 else 0
+], dtype=np.float32)
 
 if not video.isOpened():
     print("Error: Could not open video file.")
     exit()
 
-ret, first_frame = video.read()
-if not ret:
-    print("Error: Could not read first frame.")
-    exit()
-
 SCREEN_X, SCREEN_Y  = 1000, 800
+CAMERA_ANGLE_ROTATION_FROM_CALIBRATION = 90  #Currently only works with 90 and -90 and 0
 ADAPT_BLOCK = 41
 ADAPT_C = -4
 CLAHE_CLIP = 2.0
@@ -33,6 +53,7 @@ DRAWN_MOTION_MIN = 0.05
 STATIC_MIN = 5
 
 MAX_FRAME = 155
+FRAME_RATE = video.get(cv2.CAP_PROP_FPS)
 
 MAX_MATCH_DIST = 80
 REAPPEAR_DIST  = 120
@@ -66,20 +87,20 @@ alpha_static = 0.02
 WRITE_TRACKED_VIDEO = True
 output_writer = None
 
-csv_file_per_particle = open(f"{name}_per-particle_summary.csv", "w", newline="")
+csv_file_per_particle = open(f"output/csv/{name}_per-particle_summary.csv", "w", newline="")
 csv_writer_per_particle = csv.writer(csv_file_per_particle)
 csv_writer_per_particle.writerow(["particle_id", "frames_tracked", "avg_speed", "std_speed", "avg_angle", "std_angle", "avg_x_velocity", "avg_y_velocity"])
 
-csv_file_summary = open(f"{name}_summary_particle_data.csv", "w", newline="")
+csv_file_summary = open(f"output/csv/{name}_summary_particle_data.csv", "w", newline="")
 csv_writer_summary = csv.writer(csv_file_summary)
-csv_writer_summary.writerow(["particles_tracked", "avg_vx", "avg_vy", "avg_speed", "angle"])
+csv_writer_summary.writerow(["particles_tracked", "avg_vx", "avg_vy", "avg_speed", "angle", "video_frame_rate"])
 
 if WRITE_TRACKED_VIDEO:
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     #fourcc = cv2.VideoWriter_fourcc(*'XVID')
     fps = video.get(cv2.CAP_PROP_FPS)
     output_writer = cv2.VideoWriter(
-        "tracked_output.mp4", fourcc, fps, (SCREEN_X, SCREEN_Y)
+        "output/videos/tracked_output.mp4", fourcc, fps, (SCREEN_X, SCREEN_Y)
     )
 
 
@@ -263,7 +284,7 @@ def match_and_update(particles, detections, next_id):
         """ To stop drawing if the value is a ghosted value (determines via the history of the particle)"""
         try:
             p_hist = particles[pid]["history"][len(particles[pid]["history"]) - 1]
-            p_hist_result = math.sqrt(((speed - p_hist[len(p_hist) - 1]) ** 2))
+            p_hist_result = sqrt(((speed - p_hist[len(p_hist) - 1]) ** 2))
         except:
             p_hist_result = 0
 
@@ -317,11 +338,12 @@ def plot_paths():
         print("No particle history to plot.")
         return
 
-    fig1, (ax1, ax_speed, ax_length) = mpylt.subplots(3, figsize=(14, 10))
+    fig1, ax1 = mpylt.subplots(figsize=(10, 8))
     cmap = mpylt.get_cmap('gist_rainbow')
     colors = [cmap(i) for i in np.linspace(0, 1, len(all_particle_histories.items()))]
 
-    i = 0  # Enumerate being weird with dictonaries
+    all_path_displacement = []
+    i = 0
     for pid, data in all_particle_histories.items():
         hist = data["history"]
         start_cx, start_cy = data["start_center"]
@@ -334,8 +356,13 @@ def plot_paths():
         for vx, vy in hist:
             xs.append(xs[-1] + vx)
             ys.append(ys[-1] + vy)
+
+        dx = xs[-1] - xs[0]
+        dy = ys[-1] - ys[0]
+        displacement = np.hypot(dx, dy)
+        all_path_displacement.append(displacement)
         
-        color = colors[i] # Change this later needs to be better unique colors
+        color = colors[i]
         ax1.plot(xs, ys, color=color, linewidth=1.2, alpha=0.7)
         ax1.plot(xs[0], ys[0], 'o', color=color, markersize=5) 
         i += 1
@@ -347,11 +374,10 @@ def plot_paths():
     ax1.set_xlim(0, SCREEN_X)
     ax1.set_ylim(SCREEN_Y, 0)
     ax1.grid(True)
-    #mpylt.savefig(f"{name}_particle_paths.png", dpi=300, bbox_inches="tight")
+    mpylt.savefig(f"output/graphs/{name}_particle_paths.png", dpi=300, bbox_inches="tight")
 
     all_speeds = []
     all_path_lengths = []
-
     for pid, data in all_particle_histories.items():
         hist = data["history"]
         if not hist:
@@ -361,15 +387,16 @@ def plot_paths():
         all_speeds.extend(speeds)
         all_path_lengths.append(sum(speeds))
 
-    #fig2, (ax_speed, ax_length) = mpylt.subplots(1, 2, figsize=(14, 6))
+    fig2, (ax_speed, ax_length, ax_disp) = mpylt.subplots(1, 3, figsize=(14, 6))
 
     plot_bell(ax_speed,  all_speeds, "Speed Distribution", "Speed (px/frame)", "#00cfff")
     plot_bell(ax_length, all_path_lengths, "Path Length Distribution", "Path Length (px)",  "#ffaa00")
+    plot_bell(ax_disp, all_path_displacement, "Path Displacement Distribution", "Path Displacement (px)",  "#33dd1b")
     
     fig1.suptitle(f"{name} Speed & Path Length Distributions", fontsize=13)
     mpylt.tight_layout()
-    mpylt.savefig(f"{name}_graphs.png", dpi=300, bbox_inches="tight")
-    mpylt.show()
+    mpylt.savefig(f"output/graphs/{name}_distributions.png", dpi=300, bbox_inches="tight")
+    #mpylt.show()
 #
 
 
@@ -396,15 +423,65 @@ def plot_bell(ax, data, title, xlabel, color):
     ax.grid(True)
 #
 
+def rectify_image(rotated_image, original_width, original_height, angle):
+    center = (original_width / 2, original_height / 2)
+    
+    rotation_mat = cv2.getRotationMatrix2D(center, -angle, 1.0)
+    
+    abs_cos = abs(rotation_mat[0, 0])
+    abs_sin = abs(rotation_mat[0, 1])
+    bound_w = int(original_height * abs_sin + original_width * abs_cos)
+    bound_h = int(original_height * abs_cos + original_width * abs_sin)
+    
+    rotation_mat[0, 2] += bound_w / 2 - center[0]
+    rotation_mat[1, 2] += bound_h / 2 - center[1]
+    
+    rectified_image = cv2.warpAffine(
+        rotated_image, 
+        rotation_mat, 
+        (original_width, original_height), 
+        flags=cv2.INTER_LINEAR
+    )
+    
+    return rectified_image
 
 # -- MAIN --
+first_pass = True
 while True and frame_index <= MAX_FRAME:
     ret, frame = video.read()
     if not ret:
         break
 
-    frame = cv2.resize(frame, (SCREEN_X, SCREEN_Y))
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if first_pass:
+        h, w = frame.shape[:2]
+
+        if CAMERA_ANGLE_ROTATION_FROM_CALIBRATION:
+            newcameramtx_normal, roi = cv2.getOptimalNewCameraMatrix(K, dist, (h,w), 0, (h,w))
+            map1, map2 = cv2.initUndistortRectifyMap(K, dist, None, newcameramtx_normal, (h,w), cv2.CV_32FC1)
+        else:
+            newcameramtx_normal, roi = cv2.getOptimalNewCameraMatrix(K, dist, (w,h), 0, (w,h))
+            map1, map2 = cv2.initUndistortRectifyMap(K, dist, None, newcameramtx_normal, (w,h), cv2.CV_32FC1)
+
+
+    if CAMERA_ANGLE_ROTATION_FROM_CALIBRATION:
+        frame = imutils.rotate_bound(frame, angle=CAMERA_ANGLE_ROTATION_FROM_CALIBRATION)
+
+    rectified_frame = cv2.remap(frame, map1, map2, cv2.INTER_NEAREST)
+
+    if CAMERA_ANGLE_ROTATION_FROM_CALIBRATION:
+        rectified_frame = imutils.rotate_bound(rectified_frame, angle=-CAMERA_ANGLE_ROTATION_FROM_CALIBRATION)
+
+    if first_pass:
+        if CAMERA_ANGLE_ROTATION_FROM_CALIBRATION:
+            frame = imutils.rotate_bound(frame, angle=-CAMERA_ANGLE_ROTATION_FROM_CALIBRATION)
+        cv2.imwrite("./output/images/normal_frame.png", frame)
+        cv2.imwrite("./output/images/rectified_frame.png", rectified_frame)
+        first_pass = False
+
+    
+    rectified_frame = cv2.resize(rectified_frame, (SCREEN_X, SCREEN_Y))
+
+    gray = cv2.cvtColor(rectified_frame, cv2.COLOR_BGR2GRAY)
 
     if prev_gray is None:
         prev_gray = gray.copy()
@@ -425,10 +502,10 @@ while True and frame_index <= MAX_FRAME:
     static_mask = cv2.absdiff(gray, cv2.convertScaleAbs(static_accumulator))
     _, static_mask = cv2.threshold(static_mask, 10, 255, cv2.THRESH_BINARY)
 
-    detections, binary = detect_particles(frame, motion_mask, static_mask)
+    detections, binary = detect_particles(rectified_frame, motion_mask, static_mask)
     particles, next_id = match_and_update(particles, detections, next_id)
 
-    vis = frame.copy()
+    vis = rectified_frame.copy()
     for pid, p in particles.items():
 
         cx, cy = p["center"]
@@ -520,6 +597,7 @@ if all_velocities:
         f"{avg_vy:.2f}",
         f"{avg_speed:.2f}",
         f"{velocity_to_angle(avg_vx, avg_vy):.2f}",
+        f"{FRAME_RATE}",
     ])
 
     # Add Plots
